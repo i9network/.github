@@ -15,6 +15,9 @@ on:
         default: .
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -53,20 +56,28 @@ jobs:
           push: true
           tags: |
             ${{ inputs.harbor_registry }}/${{ inputs.service_name }}:${{ steps.tag.outputs.sha_tag }}
-            ${{ inputs.harbor_registry }}/${{ inputs.service_name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   update-manifest:
     needs: [build-push]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Validate inputs
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          if ! [[ "$SERVICE_NAME" =~ ^[a-z0-9-]+$ ]]; then
+            echo "ERROR: service_name must be lowercase alphanumeric with hyphens only, got: '$SERVICE_NAME'"
+            exit 1
+          fi
       - name: Install yq
         run: |
+          YQ_VERSION="4.44.1"
           sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
           sudo chmod +x /usr/local/bin/yq
+          yq --version
       - name: Checkout K8S-ISPM
         uses: actions/checkout@v4
         with:
@@ -74,21 +85,34 @@ jobs:
           token: ${{ secrets.MANIFEST_WRITE_TOKEN }}
           path: k8s-manifests
       - name: Update staging image tag
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          HARBOR_REGISTRY: ${{ inputs.harbor_registry }}
+          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
         run: |
           cd k8s-manifests
-          IMAGE="${{ inputs.harbor_registry }}/${{ inputs.service_name }}:${{ needs.build-push.outputs.image_tag }}"
-          yq -i "(.spec.template.spec.containers[] | select(.name == \"${{ inputs.service_name }}\")).image = \"$IMAGE\"" \
-            services/staging/${{ inputs.service_name }}.yaml
+          IMAGE="${HARBOR_REGISTRY}/${SERVICE_NAME}:${IMAGE_TAG}"
+          yq -i "(.spec.template.spec.containers[] | select(.name == \"${SERVICE_NAME}\")).image = \"${IMAGE}\"" \
+            "services/staging/${SERVICE_NAME}.yaml"
       - name: Commit and push with retry-rebase
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
         run: |
           cd k8s-manifests
           git config user.email "ci-bot@praction.io"
           git config user.name "CI Bot"
-          git add services/staging/${{ inputs.service_name }}.yaml
+          git add "services/staging/${SERVICE_NAME}.yaml"
           git diff --staged --quiet && echo "No image change, skipping commit" && exit 0
-          git commit -m "ci: bump ${{ inputs.service_name }} to ${{ needs.build-push.outputs.image_tag }}"
+          git commit -m "ci: bump ${SERVICE_NAME} to ${IMAGE_TAG}"
+          PUSHED=false
           for i in 1 2 3; do
-            git pull --rebase origin main && git push && break
+            git rebase --abort 2>/dev/null || true
+            if git pull --rebase origin main && git push; then
+              PUSHED=true
+              break
+            fi
             echo "Push attempt $i failed, retrying in $((i * 5))s..."
             sleep $((i * 5))
           done
+          $PUSHED || { echo "All push attempts failed — manifest not updated"; exit 1; }
