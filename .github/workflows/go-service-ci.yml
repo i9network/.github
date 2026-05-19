@@ -66,18 +66,17 @@ jobs:
       - name: Validate inputs
         env:
           SERVICE_NAME: ${{ inputs.service_name }}
+          HARBOR_REGISTRY: ${{ inputs.harbor_registry }}
         run: |
           if ! [[ "$SERVICE_NAME" =~ ^[a-z0-9-]+$ ]]; then
             echo "ERROR: service_name must be lowercase alphanumeric with hyphens only, got: '$SERVICE_NAME'"
             exit 1
           fi
-      - name: Install yq
-        run: |
-          YQ_VERSION="4.44.1"
-          sudo wget -qO /usr/local/bin/yq \
-            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
-          sudo chmod +x /usr/local/bin/yq
-          yq --version
+          if ! [[ "$HARBOR_REGISTRY" =~ ^[a-zA-Z0-9._:/-]+$ ]]; then
+            echo "ERROR: harbor_registry contains invalid characters: '$HARBOR_REGISTRY'"
+            exit 1
+          fi
+      - uses: mikefarah/yq@v4.44.1
       - name: Checkout K8S-ISPM
         uses: actions/checkout@v4
         with:
